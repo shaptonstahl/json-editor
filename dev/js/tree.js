@@ -2,22 +2,69 @@
  * tree.js — renders a JSON value as an interactive tree and supports
  * inline value editing that feeds back into the editor via onEdit().
  *
- * renderTree(value, container, onEdit)
- *   value     — parsed JSON value (any type)
- *   container — DOM element to render into
- *   onEdit    — callback(newRootValue) called when a value is changed
+ * renderTree(value, container, onEdit, onSortKeys)
+ *   value      — parsed JSON value (any type)
+ *   container  — DOM element to render into
+ *   onEdit     — callback(newRootValue) called when a value is changed
+ *   onSortKeys — callback(path, recursive) called for sort-keys context menu
+ *
+ * renderJsonlTree(entries, container, onEdit, onSortKeys)
+ *   entries    — array of parsed JSON values (one per JSONL line, undefined for blank/invalid)
+ *   container  — DOM element to render into
+ *   onEdit     — callback(lineIndex, newLineValue) called when a value is changed
+ *   onSortKeys — callback(path, recursive) called for sort-keys context menu
  */
 
-export function renderTree(value, container, onEdit) {
-  container.innerHTML = "";
-  const ul = buildNode(value, null, null, [], onEdit);
+export function renderTree(value, container, onEdit, onSortKeys) {
+  container.textContent = "";
+  const ul = buildNode(value, null, null, [], onEdit, onSortKeys);
   container.appendChild(ul);
 }
 
-// ── Internal path tracking ─────────────────────────────────
-// path is an array of keys/indices from root to this node
+export function renderJsonlTree(entries, container, onEdit, onSortKeys) {
+  container.textContent = "";
+  const ul = document.createElement("ul");
+  ul.className = "tree-node";
 
-function buildNode(value, key, index, path, onEdit) {
+  entries.forEach((entry, i) => {
+    if (entry === undefined) return;
+
+    const lineOnEdit = (newRoot) => onEdit(i, newRoot);
+    const lineOnSortKeys = (path, recursive) => onSortKeys([i, ...path], recursive);
+
+    const isObject = typeof entry === "object" && entry !== null;
+
+    const li = document.createElement("li");
+
+    if (isObject) {
+      renderBranch(li, entry, null, `Line ${i + 1}`, [], lineOnEdit, lineOnSortKeys);
+    } else {
+      const item = document.createElement("div");
+      item.className = "tree-item";
+      li.appendChild(item);
+
+      const toggle = document.createElement("span");
+      toggle.className = "tree-toggle open";
+      item.appendChild(toggle);
+
+      const label = document.createElement("span");
+      label.className = "tree-index";
+      label.textContent = `Line ${i + 1}`;
+      item.appendChild(label);
+
+      const valEl = document.createElement("span");
+      valEl.className = `tree-value-${getType(entry)}`;
+      valEl.textContent = formatValue(entry);
+      item.appendChild(valEl);
+    }
+
+    ul.appendChild(li);
+  });
+
+  container.appendChild(ul);
+}
+
+function buildNode(value, key, index, path, onEdit, onSortKeys) {
   const ul = document.createElement("ul");
   ul.className = "tree-node";
 
@@ -25,7 +72,7 @@ function buildNode(value, key, index, path, onEdit) {
   ul.appendChild(li);
 
   if (value !== null && typeof value === "object") {
-    renderBranch(li, value, key, index, path, onEdit);
+    renderBranch(li, value, key, index, path, onEdit, onSortKeys);
   } else {
     renderLeaf(li, value, key, index, path, onEdit);
   }
@@ -33,7 +80,7 @@ function buildNode(value, key, index, path, onEdit) {
   return ul;
 }
 
-function renderBranch(li, value, key, index, path, onEdit) {
+function renderBranch(li, value, key, index, path, onEdit, onSortKeys) {
   const isArray = Array.isArray(value);
   const entries = isArray ? value : Object.entries(value);
   const count = isArray ? value.length : entries.length;
@@ -42,31 +89,17 @@ function renderBranch(li, value, key, index, path, onEdit) {
   item.className = "tree-item";
   li.appendChild(item);
 
-  // Toggle button
   const toggle = document.createElement("span");
   toggle.className = "tree-toggle open";
   item.appendChild(toggle);
 
-  // Key or index label
-  if (key !== null) {
-    const keyEl = document.createElement("span");
-    keyEl.className = "tree-key";
-    keyEl.textContent = JSON.stringify(key);
-    item.appendChild(keyEl);
-  } else if (index !== null) {
-    const idxEl = document.createElement("span");
-    idxEl.className = "tree-index";
-    idxEl.textContent = index;
-    item.appendChild(idxEl);
-  }
+  appendLabel(item, key, index);
 
-  // Opening bracket
   const openBracket = document.createElement("span");
   openBracket.className = "tree-bracket";
   openBracket.textContent = isArray ? "[" : "{";
   item.appendChild(openBracket);
 
-  // Summary (shown when collapsed)
   const summary = document.createElement("span");
   summary.className = "tree-summary";
   summary.textContent = isArray
@@ -75,27 +108,24 @@ function renderBranch(li, value, key, index, path, onEdit) {
   summary.style.display = "none";
   item.appendChild(summary);
 
-  // Children container
   const children = document.createElement("div");
   children.className = "tree-children";
   li.appendChild(children);
 
-  // Render children
   if (isArray) {
     value.forEach((child, i) => {
       const childPath = [...path, i];
-      const childNode = buildNode(child, null, i, childPath, onEdit);
+      const childNode = buildNode(child, null, i, childPath, onEdit, onSortKeys);
       children.appendChild(childNode);
     });
   } else {
     entries.forEach(([k, v]) => {
       const childPath = [...path, k];
-      const childNode = buildNode(v, k, null, childPath, onEdit);
+      const childNode = buildNode(v, k, null, childPath, onEdit, onSortKeys);
       children.appendChild(childNode);
     });
   }
 
-  // Closing bracket row
   const closingRow = document.createElement("div");
   closingRow.className = "tree-item";
   const indent = document.createElement("span");
@@ -107,7 +137,6 @@ function renderBranch(li, value, key, index, path, onEdit) {
   closingRow.appendChild(closeBracket);
   li.appendChild(closingRow);
 
-  // Toggle open/closed
   toggle.addEventListener("click", () => {
     const open = toggle.classList.toggle("open");
     children.style.display = open ? "" : "none";
@@ -117,6 +146,10 @@ function renderBranch(li, value, key, index, path, onEdit) {
       ? (isArray ? "[" : "{")
       : (isArray ? "[…]" : "{…}");
   });
+
+  if (!isArray && onSortKeys) {
+    addSortContextMenu(item, path, onSortKeys);
+  }
 }
 
 function renderLeaf(li, value, key, index, path, onEdit) {
@@ -124,32 +157,18 @@ function renderLeaf(li, value, key, index, path, onEdit) {
   item.className = "tree-item";
   li.appendChild(item);
 
-  // Indent placeholder (no toggle button)
   const indent = document.createElement("span");
   indent.className = "tree-leaf-indent";
   item.appendChild(indent);
 
-  // Key or index label
-  if (key !== null) {
-    const keyEl = document.createElement("span");
-    keyEl.className = "tree-key";
-    keyEl.textContent = JSON.stringify(key);
-    item.appendChild(keyEl);
-  } else if (index !== null) {
-    const idxEl = document.createElement("span");
-    idxEl.className = "tree-index";
-    idxEl.textContent = index;
-    item.appendChild(idxEl);
-  }
+  appendLabel(item, key, index);
 
-  // Value (editable)
   const valEl = document.createElement("span");
   valEl.className = `tree-value-${getType(value)}`;
   valEl.textContent = formatValue(value);
   valEl.title = "Double-click to edit";
   item.appendChild(valEl);
 
-  // Inline editing on double-click
   valEl.addEventListener("dblclick", () => {
     const input = document.createElement("input");
     input.type = "text";
@@ -169,14 +188,13 @@ function renderLeaf(li, value, key, index, path, onEdit) {
       try {
         newVal = JSON.parse(input.value);
       } catch {
-        // Treat as string if parse fails
         newVal = input.value;
       }
       valEl.textContent = formatValue(newVal);
       valEl.className = `tree-value-${getType(newVal)}`;
       item.replaceChild(valEl, input);
       if (newVal !== value) {
-        onEdit(applyEdit(getRootFromTree(li), path, newVal));
+        onEdit(applyEdit(window.__currentParsedDoc, path, newVal));
       }
     };
 
@@ -190,7 +208,73 @@ function renderLeaf(li, value, key, index, path, onEdit) {
   });
 }
 
+// ── Context menu for sort keys ────────────────────────────
+let activeContextMenu = null;
+
+function dismissContextMenu() {
+  if (activeContextMenu) {
+    activeContextMenu.remove();
+    activeContextMenu = null;
+  }
+}
+
+function addSortContextMenu(itemEl, path, onSortKeys) {
+  itemEl.addEventListener("contextmenu", e => {
+    e.preventDefault();
+    dismissContextMenu();
+
+    const menu = document.createElement("div");
+    menu.className = "tree-context-menu";
+    menu.style.left = e.clientX + "px";
+    menu.style.top = e.clientY + "px";
+
+    const sortHere = document.createElement("div");
+    sortHere.className = "tree-context-menu-item";
+    sortHere.textContent = "Sort keys";
+    sortHere.addEventListener("click", () => {
+      dismissContextMenu();
+      onSortKeys(path, false);
+    });
+    menu.appendChild(sortHere);
+
+    const sortRecursive = document.createElement("div");
+    sortRecursive.className = "tree-context-menu-item";
+    sortRecursive.textContent = "Sort keys (recursive)";
+    sortRecursive.addEventListener("click", () => {
+      dismissContextMenu();
+      onSortKeys(path, true);
+    });
+    menu.appendChild(sortRecursive);
+
+    document.body.appendChild(menu);
+    activeContextMenu = menu;
+
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + "px";
+    if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + "px";
+  });
+}
+
+document.addEventListener("click", dismissContextMenu);
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") dismissContextMenu();
+});
+
 // ── Helpers ────────────────────────────────────────────────
+function appendLabel(parent, key, index) {
+  if (key !== null) {
+    const keyEl = document.createElement("span");
+    keyEl.className = "tree-key";
+    keyEl.textContent = JSON.stringify(key);
+    parent.appendChild(keyEl);
+  } else if (index !== null) {
+    const idxEl = document.createElement("span");
+    idxEl.className = "tree-index";
+    idxEl.textContent = index;
+    parent.appendChild(idxEl);
+  }
+}
+
 function getType(v) {
   if (v === null) return "null";
   if (typeof v === "boolean") return "boolean";
@@ -204,27 +288,17 @@ function formatValue(v) {
   return String(v);
 }
 
-/**
- * Walk up the DOM to find the root tree-container, then extract the
- * current JSON value from it so we can apply the edit.
- */
-function getRootFromTree(startEl) {
-  let el = startEl;
-  while (el && el.id !== "tree-container") el = el.parentElement;
-  // Re-parse from the editor via DOM traversal is complex.
-  // Instead, we read from the CodeMirror doc via a shared reference.
-  // We use the window-level currentDoc set by editor.js.
-  return window.__currentParsedDoc;
-}
-
-/**
- * Return a deep copy of root with the value at path replaced by newVal.
- */
-function applyEdit(root, path, newVal) {
+export function applyEdit(root, path, newVal) {
   if (path.length === 0) return newVal;
 
   const clone = Array.isArray(root) ? [...root] : { ...root };
   const [head, ...tail] = path;
   clone[head] = tail.length === 0 ? newVal : applyEdit(clone[head], tail, newVal);
   return clone;
+}
+
+export function getAtPath(obj, path) {
+  let cur = obj;
+  for (const key of path) cur = cur[key];
+  return cur;
 }

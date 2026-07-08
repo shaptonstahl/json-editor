@@ -256,6 +256,31 @@ button:disabled {
   padding-left: 16px;
 }
 
+/* ── Context menu ───────────────────────────────────────── */
+.tree-context-menu {
+  position: fixed;
+  background: #2d2d2d;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 0;
+  z-index: 1000;
+  min-width: 160px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.tree-context-menu-item {
+  padding: 5px 16px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tree-context-menu-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* ── Empty state ─────────────────────────────────────────── */
 #tree-container:empty::after {
   content: "Open a JSON file to begin";

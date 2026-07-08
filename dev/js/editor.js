@@ -1,12 +1,12 @@
 import { EditorView, keymap, highlightActiveLine, lineNumbers, highlightActiveLineGutter, drawSelection } from "../lib/codemirror/cm-view.js";
-import { EditorState, Compartment } from "../lib/codemirror/cm-state.js";
+import { EditorState } from "../lib/codemirror/cm-state.js";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "../lib/codemirror/cm-commands.js";
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, indentOnInput } from "../lib/codemirror/cm-language.js";
 import { searchKeymap, highlightSelectionMatches } from "../lib/codemirror/cm-search.js";
 import { closeBrackets, closeBracketsKeymap, autocompletion, completionKeymap } from "../lib/codemirror/cm-autocomplete.js";
 import { lintKeymap } from "../lib/codemirror/cm-lint.js";
 import { json } from "../lib/codemirror/cm-lang-json.js";
-import { renderTree } from "./tree.js";
+import { renderTree, renderJsonlTree, applyEdit, getAtPath } from "./tree.js";
 import { initSplitter } from "./splitter.js";
 
 // ── State ──────────────────────────────────────────────────
@@ -14,13 +14,16 @@ let fileHandle = null;
 let isDirty = false;
 let ignoreEditorChange = false;
 let treeDebounceTimer = null;
+let fileMode = "json"; // "json" or "jsonl"
 
 const elFileName    = document.getElementById("file-name");
 const elDirty       = document.getElementById("dirty-indicator");
 const elBtnSave     = document.getElementById("btn-save");
 const elBtnOpen     = document.getElementById("btn-open");
 const elBtnSaveAs   = document.getElementById("btn-save-as");
-const elBtnFormat   = document.getElementById("btn-format");
+const elBtnPrettify = document.getElementById("btn-prettify");
+const elBtnMinify   = document.getElementById("btn-minify");
+const elBtnSortKeys = document.getElementById("btn-sort-keys");
 const elBtnCollapse = document.getElementById("btn-collapse-all");
 const elBtnExpand   = document.getElementById("btn-expand-all");
 const elTreeContainer = document.getElementById("tree-container");
@@ -28,8 +31,6 @@ const elTreeError     = document.getElementById("tree-error");
 const elEditorContainer = document.getElementById("editor-container");
 
 // ── CodeMirror setup ───────────────────────────────────────
-const themeCompartment = new Compartment();
-
 function buildExtensions() {
   return [
     lineNumbers(),
@@ -89,6 +90,22 @@ function setDirty(dirty) {
   elBtnSave.disabled = !dirty || !fileHandle;
 }
 
+// ── Sort key utilities ────────────────────────────────────
+function sortKeysShallow(obj) {
+  if (Array.isArray(obj) || typeof obj !== "object" || obj === null) return obj;
+  const sorted = {};
+  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k];
+  return sorted;
+}
+
+function sortKeysDeep(obj) {
+  if (Array.isArray(obj)) return obj.map(sortKeysDeep);
+  if (typeof obj !== "object" || obj === null) return obj;
+  const sorted = {};
+  for (const k of Object.keys(obj).sort()) sorted[k] = sortKeysDeep(obj[k]);
+  return sorted;
+}
+
 // ── Tree sync ──────────────────────────────────────────────
 function scheduleTreeUpdate() {
   clearTimeout(treeDebounceTimer);
@@ -100,39 +117,136 @@ function syncTree() {
   elTreeError.textContent = "";
 
   if (!text.trim()) {
-    elTreeContainer.innerHTML = "";
+    elTreeContainer.textContent = "";
     return;
   }
 
-  try {
-    const parsed = JSON.parse(text);
-    window.__currentParsedDoc = parsed;
-    renderTree(parsed, elTreeContainer, onTreeEdit);
-  } catch (e) {
-    elTreeError.textContent = e.message;
-    elTreeContainer.innerHTML = "";
+  if (fileMode === "jsonl") {
+    syncTreeJsonl(text);
+  } else {
+    syncTreeJson(text);
   }
 }
 
-// Called by tree when an inline edit is confirmed
-function onTreeEdit(newJson) {
-  const formatted = JSON.stringify(newJson, null, 2);
-  ignoreEditorChange = true;
-  view.dispatch({
-    changes: { from: 0, to: view.state.doc.length, insert: formatted },
-  });
-  ignoreEditorChange = false;
-  setDirty(true);
+function syncTreeJson(text) {
+  try {
+    const parsed = JSON.parse(text);
+    window.__currentParsedDoc = parsed;
+    renderTree(parsed, elTreeContainer, onTreeEdit, onSortKeys);
+  } catch (e) {
+    elTreeError.textContent = e.message;
+    elTreeContainer.textContent = "";
+  }
 }
 
-// ── File I/O ───────────────────────────────────────────────
-function setContent(text, handle) {
-  fileHandle = handle || null;
+function syncTreeJsonl(text) {
+  const lines = text.split("\n");
+  const entries = [];
+  const errors = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) { entries.push(undefined); continue; }
+    try {
+      entries.push(JSON.parse(line));
+    } catch (e) {
+      entries.push(undefined);
+      errors.push(`Line ${i + 1}: ${e.message}`);
+    }
+  }
+
+  window.__currentParsedDoc = entries;
+  elTreeError.textContent = errors.join("\n");
+  renderJsonlTree(entries, elTreeContainer, onJsonlTreeEdit, onSortKeys);
+}
+
+function dispatchText(text) {
   ignoreEditorChange = true;
   view.dispatch({
     changes: { from: 0, to: view.state.doc.length, insert: text },
   });
   ignoreEditorChange = false;
+}
+
+function setEditorText(text) {
+  dispatchText(text);
+  setDirty(true);
+}
+
+function onTreeEdit(newJson) {
+  setEditorText(JSON.stringify(newJson, null, 2));
+}
+
+function onJsonlTreeEdit(lineIndex, newLineValue) {
+  const lines = view.state.doc.toString().split("\n");
+  lines[lineIndex] = JSON.stringify(newLineValue);
+  setEditorText(lines.join("\n"));
+}
+
+// ── JSONL helpers ─────────────────────────────────────────
+function transformJsonlLines(text, fn) {
+  return text.split("\n").map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+    try {
+      return fn(JSON.parse(trimmed));
+    } catch { return line; }
+  }).join("\n");
+}
+
+function onSortKeys(path, recursive) {
+  const sortFn = recursive ? sortKeysDeep : sortKeysShallow;
+
+  if (fileMode === "jsonl") {
+    if (path.length === 0) {
+      const text = view.state.doc.toString();
+      replaceEditorContent(transformJsonlLines(text, parsed => JSON.stringify(sortFn(parsed))));
+    } else {
+      const text = view.state.doc.toString();
+      const lines = text.split("\n");
+      const lineIdx = path[0];
+      const subPath = path.slice(1);
+      const trimmed = lines[lineIdx].trim();
+      if (trimmed) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          const target = getAtPath(parsed, subPath);
+          if (typeof target === "object" && target !== null && !Array.isArray(target)) {
+            lines[lineIdx] = JSON.stringify(applyEdit(parsed, subPath, sortFn(target)));
+          }
+        } catch {}
+      }
+      replaceEditorContent(lines.join("\n"));
+    }
+  } else {
+    const root = window.__currentParsedDoc;
+    const target = getAtPath(root, path);
+    if (typeof target === "object" && target !== null && !Array.isArray(target)) {
+      const newRoot = path.length === 0 ? sortFn(target) : applyEdit(root, path, sortFn(target));
+      replaceEditorContent(JSON.stringify(newRoot, null, 2));
+    }
+  }
+}
+
+function replaceEditorContent(text) {
+  setEditorText(text);
+  syncTree();
+}
+
+// ── File I/O ───────────────────────────────────────────────
+const fileTypes = [
+  { description: "JSON files", accept: { "application/json": [".json"] } },
+  { description: "JSON Lines files", accept: { "application/x-jsonlines": [".jsonl"] } },
+];
+
+function detectFileMode(name) {
+  return name && name.endsWith(".jsonl") ? "jsonl" : "json";
+}
+
+function setContent(text, handle) {
+  fileHandle = handle || null;
+  fileMode = handle ? detectFileMode(handle.name) : "json";
+  dispatchText(text);
   setDirty(false);
   elBtnSave.disabled = !fileHandle;
   elFileName.textContent = handle ? handle.name : "";
@@ -142,7 +256,7 @@ function setContent(text, handle) {
 async function openFile() {
   try {
     const [handle] = await window.showOpenFilePicker({
-      types: [{ description: "JSON files", accept: { "application/json": [".json"] } }],
+      types: fileTypes,
       multiple: false,
     });
     const file = await handle.getFile();
@@ -167,14 +281,16 @@ async function saveFile() {
 
 async function saveFileAs() {
   try {
+    const defaultName = fileHandle ? fileHandle.name : (fileMode === "jsonl" ? "data.jsonl" : "data.json");
     const handle = await window.showSaveFilePicker({
-      suggestedName: (fileHandle ? fileHandle.name : "data.json"),
-      types: [{ description: "JSON files", accept: { "application/json": [".json"] } }],
+      suggestedName: defaultName,
+      types: fileTypes,
     });
     const writable = await handle.createWritable();
     await writable.write(view.state.doc.toString());
     await writable.close();
     fileHandle = handle;
+    fileMode = detectFileMode(handle.name);
     elFileName.textContent = handle.name;
     setDirty(false);
     elBtnSave.disabled = false;
@@ -183,19 +299,45 @@ async function saveFileAs() {
   }
 }
 
-function formatJSON() {
+// ── Prettify / Minify ─────────────────────────────────────
+function prettifyJSON() {
   const text = view.state.doc.toString();
   try {
-    const formatted = JSON.stringify(JSON.parse(text), null, 2);
-    ignoreEditorChange = true;
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: formatted },
-    });
-    ignoreEditorChange = false;
-    setDirty(true);
-    syncTree();
-  } catch (e) {
-    // Invalid JSON - just leave it
+    if (fileMode === "jsonl") {
+      replaceEditorContent(transformJsonlLines(text, parsed => JSON.stringify(parsed)));
+    } else {
+      replaceEditorContent(JSON.stringify(JSON.parse(text), null, 2));
+    }
+  } catch {
+    // Invalid JSON - leave it
+  }
+}
+
+function minifyJSON() {
+  const text = view.state.doc.toString();
+  try {
+    if (fileMode === "jsonl") {
+      const result = transformJsonlLines(text, parsed => JSON.stringify(parsed));
+      replaceEditorContent(result.split("\n").filter(line => line.trim()).join("\n"));
+    } else {
+      replaceEditorContent(JSON.stringify(JSON.parse(text)));
+    }
+  } catch {
+    // Invalid JSON - leave it
+  }
+}
+
+// ── Sort keys (global) ───────────────────────────────────
+function sortAllKeys() {
+  const text = view.state.doc.toString();
+  try {
+    if (fileMode === "jsonl") {
+      replaceEditorContent(transformJsonlLines(text, parsed => JSON.stringify(sortKeysDeep(parsed))));
+    } else {
+      replaceEditorContent(JSON.stringify(sortKeysDeep(JSON.parse(text)), null, 2));
+    }
+  } catch {
+    // Invalid JSON - leave it
   }
 }
 
@@ -217,7 +359,9 @@ document.addEventListener("keydown", e => {
 elBtnOpen.addEventListener("click", openFile);
 elBtnSave.addEventListener("click", saveFile);
 elBtnSaveAs.addEventListener("click", saveFileAs);
-elBtnFormat.addEventListener("click", formatJSON);
+elBtnPrettify.addEventListener("click", prettifyJSON);
+elBtnMinify.addEventListener("click", minifyJSON);
+elBtnSortKeys.addEventListener("click", sortAllKeys);
 
 elBtnCollapse.addEventListener("click", () => {
   elTreeContainer.querySelectorAll(".tree-toggle.open").forEach(btn => btn.click());
